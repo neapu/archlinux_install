@@ -14,6 +14,8 @@ GPU_VENDOR_NVIDIA=0
 KDE_PACKAGES=(
 	# KDE Plasma 桌面环境元包。
 	plasma
+    # KDE 图形登录管理器。
+    sddm
 	# Baloo 搜索结果小部件。
 	baloo-widgets
 	# Dolphin 文件管理器扩展插件。
@@ -60,6 +62,12 @@ KDE_PACKAGES=(
 	unarchiver
 	# ZIP 解压工具。
 	unzip
+    # 输入法
+    fcitx5
+    fcitx5-chinese-addons
+    fcitx5-configtool
+    fcitx5-gtk
+    fcitx5-qt
 )
 
 # 禁用 snd_hda_intel 声卡节能。
