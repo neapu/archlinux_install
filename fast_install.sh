@@ -26,7 +26,6 @@ BOOT_FILESYSTEM_PACKAGES=(
     btrfs-progs
     grub
     efibootmgr
-    sbctl
 )
 
 # 网络与权限管理工具。

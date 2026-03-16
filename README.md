@@ -2,7 +2,7 @@
 
 This repository contains a set of highly customized Arch Linux installation scripts created for personal use.
 
-These scripts are not intended to be a general-purpose installer. They reflect one specific setup preference, including package choices, filesystem layout, Secure Boot workflow, mirrors, locale settings, timezone, desktop environment selection, and post-install defaults.
+These scripts are not intended to be a general-purpose installer. They reflect one specific setup preference, including package choices, filesystem layout, bootloader setup, mirrors, locale settings, timezone, desktop environment selection, and post-install defaults.
 
 ## Status
 
@@ -15,7 +15,7 @@ The scripts assume a UEFI-based Arch installation flow and include destructive d
 The repository currently includes:
 
 - `fast_install.sh`: prepares disks, installs the base system, and copies the remaining scripts into the target system.
-- `chroot_install.sh`: runs inside `arch-chroot` to configure the new system, install GRUB, and prepare Secure Boot signing.
+- `chroot_install.sh`: runs inside `arch-chroot` to configure the new system and install GRUB.
 - `after_install.sh`: applies post-install preferences such as repositories, drivers, desktop packages, and optional services.
 - `common.sh`: shared helper functions for logging and root/command checks.
 
