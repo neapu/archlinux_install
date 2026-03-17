@@ -1,12 +1,32 @@
-import subprocess
 import json
 import getpass
 import time
 import os
 import re
 
+import install_kde
+from common import (
+    Colors,
+    check_network,
+    print_error,
+    print_info,
+    print_success,
+    print_warning,
+    run_chroot_cmd,
+    run_cmd,
+    setup_logging,
+)
+
+
+# ==============================
+# 全局配置
+# ==============================
 MIRROR_SERVER = "mirrors.ustc.edu.cn"
 EFI_PARTITION_SIZE_MB = 300
+LOG_FILE_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    f"fast_install_{time.strftime('%Y%m%d_%H%M%S')}.log",
+)
 
 PACKAGE_LIST = [
     # 基本工具包
@@ -23,6 +43,20 @@ PACKAGE_LIST = [
     "networkmanager",
     # 雷电4支持
     "bolt",
+    # 电源策略管理
+    "power-profiles-daemon",
+    # 蓝牙与蓝牙音频支持
+    "bluez",
+    "bluez-utils",
+    # 音频组件
+    "pipewire",
+    "pipewire-alsa",
+    "pipewire-pulse",
+    "pipewire-jack",
+    "wireplumber",
+    "alsa-utils",
+    # zram 压缩交换
+    "zram-generator",
     # 引导加载器
     "grub", "efibootmgr",
     # 其他实用工具
@@ -38,38 +72,6 @@ PACKAGE_LIST = [
 ]
 
 SELECTED_DISK = None
-
-
-class Colors:
-    RESET = "\033[0m"
-    RED = "\033[31m"
-    GREEN = "\033[32m"
-    YELLOW = "\033[33m"
-    BLUE = "\033[34m"
-
-
-# 安装环境与基础输出
-def is_connected_ping(host):
-    try:
-        subprocess.run(
-            ["ping", "-c", "1", "-W", "2", host],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        return True
-    except subprocess.CalledProcessError:
-        return False
-
-
-def check_network(host):
-    if is_connected_ping(host):
-        print("Network is connected.")
-        return True
-
-    print("Network is not connected. Retrying in 5 seconds...")
-    time.sleep(5)
-    return is_connected_ping(host)
 
 
 def check_x86_64_efi_environment():
@@ -93,45 +95,9 @@ def check_x86_64_efi_environment():
     return True
 
 
-def print_info(message):
-    print(f"{Colors.BLUE}{message}{Colors.RESET}")
-
-
-def print_success(message):
-    print(f"{Colors.GREEN}{message}{Colors.RESET}")
-
-
-def print_error(message):
-    print(f"{Colors.RED}{message}{Colors.RESET}")
-
-
-def print_warning(message):
-    print(f"{Colors.YELLOW}{message}{Colors.RESET}")
-
-
-# 命令执行封装，统一处理普通命令与 chroot 命令
-def run_cmd(cmd, error_message=None, capture_output=True, input_text=None):
-    try:
-        result = subprocess.run(cmd, capture_output=capture_output, text=True, input=input_text)
-    except Exception as e:
-        prefix = error_message or f"Error running {' '.join(cmd)}"
-        print_error(f"{prefix}: {e}")
-        return None
-
-    if result.returncode != 0:
-        prefix = error_message or f"Error running {' '.join(cmd)}"
-        detail = result.stderr.strip() if result.stderr else result.stdout.strip()
-        print_error(f"{prefix}: {detail}")
-        return None
-
-    return result
-
-
-def run_chroot_cmd(cmd, error_message=None, capture_output=True, input_text=None):
-    return run_cmd(["arch-chroot", "/mnt"] + cmd, error_message, capture_output, input_text)
-
-
-# 交互输入：确认、主机信息、账户信息
+# ==============================
+# 交互输入
+# ==============================
 def confirm_action(message, default_yes=True):
     prompt = " [Y/n]: " if default_yes else " [y/N]: "
     while True:
@@ -170,17 +136,9 @@ def get_install_credentials():
     hostname = input("Enter the hostname for your new Arch Linux installation: ").strip()
     if not hostname:
         print_error("Hostname cannot be empty.")
-        return None, None
+        return None
 
-    root_password = get_confirmed_password(
-        "Enter the root password for your new Arch Linux installation: ",
-        "Confirm the root password: ",
-        "Root password cannot be empty.",
-    )
-    if root_password is None:
-        return None, None
-
-    return hostname, root_password
+    return hostname
 
 
 def get_user_credentials():
@@ -204,7 +162,13 @@ def get_user_credentials():
     return username, user_password
 
 
+def should_install_kde():
+    return confirm_action("Do you want to install KDE Plasma desktop environment?", default_yes=False)
+
+
+# ==============================
 # 磁盘探测、分区与挂载
+# ==============================
 def get_disk_block():
     cmd = ["lsblk", "-J", "-b", "-o", "NAME,SIZE,TYPE,MODEL"]
     result = run_cmd(cmd, "Error running lsblk")
@@ -226,7 +190,8 @@ def get_disk_block():
                 "model": block.get("model", "")
             })
     return disks
-    
+
+
 def get_partition_block(disk):
     disk_path = f"/dev/{disk['name']}"
     cmd = ["lsblk", "-J", "-l", "-o", "PATH,TYPE", disk_path]
@@ -245,14 +210,16 @@ def get_partition_block(disk):
         if block["type"] == "part":
             partitions.append(block["path"])
     return partitions
-    
+
+
 def format_size(size_bytes):
     for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
         if size_bytes < 1024:
             return f"{size_bytes:.2f} {unit}"
         size_bytes /= 1024
     return f"{size_bytes:.2f} PB"
-    
+
+
 def print_disks(disks):
     rows = [
         {
@@ -275,6 +242,7 @@ def print_disks(disks):
             f"{row['name']:<{name_width}}  {row['size']:>{size_width}}  {row['model']:<{model_width}}"
         )
 
+
 def select_disk(disks):
     while True:
         choice = input("Enter the name of the target disk (e.g., sda): ").strip()
@@ -282,6 +250,7 @@ def select_disk(disks):
             if disk["name"] == choice:
                 return disk
         print_error("Invalid disk name. Please try again.")
+
 
 def partition_disk(disk):
     disk_path = f"/dev/{disk['name']}"
@@ -307,8 +276,9 @@ def partition_disk(disk):
     if partitions is None or len(partitions) < 2:
         print_error("Failed to get partition information after partitioning.")
         return None
-    
+
     return partitions
+
 
 def format_partitions(efi_partition, root_partition):
     print_info(f"Formatting EFI partition {efi_partition} as FAT32...")
@@ -322,6 +292,7 @@ def format_partitions(efi_partition, root_partition):
         return False
 
     return True
+
 
 def create_subvolumes(root_partition):
     volume_names = ["@", "@home"]
@@ -340,8 +311,10 @@ def create_subvolumes(root_partition):
         return False
 
     return True
-    
+
+
 def mount_partitions(efi_partition, root_partition):
+    # 最终挂载结构：@ -> /mnt, @home -> /mnt/home, EFI -> /mnt/efi
     cmds = [
         ["mount", "-t", "btrfs", "-o", "subvol=@,compress=zstd", root_partition, "/mnt"],
         ["mount", "--mkdir", "-t", "btrfs", "-o", "subvol=@home,compress=zstd", root_partition, "/mnt/home"],
@@ -354,7 +327,9 @@ def mount_partitions(efi_partition, root_partition):
     return True
 
 
+# ==============================
 # 安装源、基础系统与系统配置
+# ==============================
 def set_mirrorlist():
     # 备份原有mirrorlist
     if run_cmd(["cp", "/etc/pacman.d/mirrorlist", "/etc/pacman.d/mirrorlist.bak"], "Error backing up mirrorlist") is None:
@@ -372,8 +347,63 @@ def set_mirrorlist():
     # 重新同步软件包数据库
     if run_cmd(["pacman", "-Sy"], "Error syncing package database") is None:
         return False
-    
+
     return True
+
+
+def configure_additional_repositories():
+    print_info("Configuring additional pacman repositories...")
+
+    pacman_conf = "/mnt/etc/pacman.conf"
+    archlinuxcn_section = f"[archlinuxcn]\nServer = https://{MIRROR_SERVER}/archlinuxcn/$arch\n"
+
+    try:
+        with open(pacman_conf, "r", encoding="utf-8") as f:
+            pacman_conf_content = f.read()
+    except Exception as e:
+        print_error(f"Error reading pacman.conf: {e}")
+        return False
+
+    updated_content = pacman_conf_content
+    multilib_replacement, replace_count = re.subn(
+        r"(?m)^#\s*\[multilib\]\n#\s*Include\s*=\s*/etc/pacman\.d/mirrorlist",
+        "[multilib]\nInclude = /etc/pacman.d/mirrorlist",
+        updated_content,
+        count=1,
+    )
+
+    if replace_count > 0:
+        updated_content = multilib_replacement
+    elif "[multilib]" not in updated_content:
+        updated_content = updated_content.rstrip() + "\n\n[multilib]\nInclude = /etc/pacman.d/mirrorlist\n"
+
+    if "[archlinuxcn]" not in updated_content:
+        updated_content = updated_content.rstrip() + f"\n\n{archlinuxcn_section}"
+
+    try:
+        with open(pacman_conf, "w", encoding="utf-8") as f:
+            f.write(updated_content)
+    except Exception as e:
+        print_error(f"Error writing pacman.conf: {e}")
+        return False
+
+    return True
+
+
+def install_archlinuxcn_keyring():
+    print_info("Installing archlinuxcn keyring...")
+
+    if run_chroot_cmd(["pacman", "-Sy", "--noconfirm"], "Error syncing pacman databases") is None:
+        return False
+
+    if run_chroot_cmd(
+        ["pacman", "-S", "--noconfirm", "archlinuxcn-keyring"],
+        "Error installing archlinuxcn-keyring",
+    ) is None:
+        return False
+
+    return True
+
 
 def get_cpu_type():
     # intel/amd/other
@@ -386,11 +416,13 @@ def get_cpu_type():
     if "AMD" in result.stdout or "amd" in result.stdout:
         return "amd"
     return "other"
-    
+
+
 def install_base_system():
     print_info("Installing base system with pacstrap...")
     cmd = ["pacstrap", "-K", "/mnt"] + PACKAGE_LIST
 
+    # 仅在识别出 CPU 厂商时附加对应微码包。
     cpu_type = get_cpu_type()
 
     if cpu_type == "intel":
@@ -407,7 +439,8 @@ def install_base_system():
         return False
 
     return True
-    
+
+
 def generate_fstab():
     print_info("Generating fstab with genfstab...")
     cmd = ["genfstab", "-U", "/mnt"]
@@ -448,6 +481,7 @@ def set_locale():
         return False
     return True
 
+
 def set_hostname(hostname):
     print_info("Setting hostname...")
     try:
@@ -459,14 +493,65 @@ def set_hostname(hostname):
     return True
 
 
-# 账户与服务初始化
-def set_root_password(root_password):
-    print_info("Setting root password...")
-    if run_chroot_cmd(["chpasswd"], "Error setting root password", input_text=f"root:{root_password}\n") is None:
+def configure_audio():
+    print_info("Configuring audio driver options...")
+
+    modprobe_dir = "/mnt/etc/modprobe.d"
+    modprobe_file = f"{modprobe_dir}/disable-audio-powersave.conf"
+
+    try:
+        os.makedirs(modprobe_dir, exist_ok=True)
+        with open(modprobe_file, "w") as f:
+            f.write("options snd_hda_intel power_save=0\n")
+    except Exception as e:
+        print_error(f"Error configuring audio driver options: {e}")
         return False
+
     return True
 
 
+def configure_zram():
+    print_info("Configuring zram-generator...")
+
+    zram_config_dir = "/mnt/etc/systemd"
+    zram_config_file = f"{zram_config_dir}/zram-generator.conf"
+    zram_config_content = """[zram0]
+zram-size = ram / 2
+compression-algorithm = zstd
+"""
+
+    try:
+        os.makedirs(zram_config_dir, exist_ok=True)
+        with open(zram_config_file, "w") as f:
+            f.write(zram_config_content)
+    except Exception as e:
+        print_error(f"Error configuring zram-generator: {e}")
+        return False
+
+    return True
+
+
+def configure_sudo():
+    print_info("Configuring sudo for wheel group...")
+
+    sudoers_dir = "/mnt/etc/sudoers.d"
+    sudoers_file = f"{sudoers_dir}/10-wheel"
+
+    try:
+        os.makedirs(sudoers_dir, exist_ok=True)
+        with open(sudoers_file, "w") as f:
+            f.write("%wheel ALL=(ALL:ALL) ALL\n")
+        os.chmod(sudoers_file, 0o440)
+    except Exception as e:
+        print_error(f"Error configuring sudo: {e}")
+        return False
+
+    return True
+
+
+# ==============================
+# 账户与服务初始化
+# ==============================
 def create_regular_user(username, user_password):
     print_info(f"Creating regular user {username}...")
     if run_chroot_cmd(["useradd", "-m", "-G", "wheel", "-s", "/bin/bash", username], f"Error creating user {username}") is None:
@@ -477,9 +562,10 @@ def create_regular_user(username, user_password):
 
     return True
 
+
 def enable_services():
     print_info("Enabling system services...")
-    services = ["NetworkManager", "bolt"]
+    services = ["NetworkManager", "bluetooth", "bolt", "power-profiles-daemon"]
 
     for service in services:
         if run_chroot_cmd(["systemctl", "enable", service], f"Error enabling service {service}") is None:
@@ -488,7 +574,9 @@ def enable_services():
     return True
 
 
-# 引导安装与主流程编排
+# ==============================
+# 引导安装
+# ==============================
 def setup_grub():
     print_info("Setting up GRUB bootloader...")
     cmds = [
@@ -500,25 +588,34 @@ def setup_grub():
         if run_chroot_cmd(cmd) is None:
             return False
     return True
-    
+
+
+# ==============================
+# 主流程编排
+# ==============================
 def main():
+    print_info(f"Installer log: {LOG_FILE_PATH}")
     print_success("Welcome to the Arch Linux Fast Installer!")
+
+    # 先确认当前 live 环境满足 UEFI 安装前提。
     if not check_x86_64_efi_environment():
         exit(1)
 
-    # 检查网络连接
+    # 网络不可用时后续 pacman 和 pacstrap 都会失败，所以尽早退出。
     if not check_network(MIRROR_SERVER):
         print_error("Network is not connected. Please check your connection and try again.")
         exit(1)
 
-    # 获取用户输入的主机名和root密码
-    hostname, root_password = get_install_credentials()
-    if hostname is None or root_password is None:
+    # 收集安装目标主机和普通用户信息。
+    hostname = get_install_credentials()
+    if hostname is None:
         exit(1)
 
     username, user_password = get_user_credentials()
     if username is None or user_password is None:
         exit(1)
+
+    install_kde_selected = should_install_kde()
 
     print_info("Step 1: Select target disk")
 
@@ -534,7 +631,7 @@ def main():
     print_success(f"Selected disk: {SELECTED_DISK['name']} ({format_size(SELECTED_DISK['size'])})")
 
     print_info("Step 2: Partitioning disk")
-    # 二次确认警告
+    # 分区会清空目标盘，要求用户明确确认一次。
     if not confirm_action(f"Are you sure you want to install Arch Linux on /dev/{SELECTED_DISK['name']}? This will erase all data on the disk.", default_yes=False):
         print_warning("Installation cancelled by user.")
         exit(0)
@@ -569,42 +666,68 @@ def main():
         print_error("Failed to install base system.")
         exit(1)
 
-    print_info("Step 8: Generating fstab")
+    print_info("Step 8: Configuring additional pacman repositories")
+    if not configure_additional_repositories():
+        print_error("Failed to configure additional pacman repositories.")
+        exit(1)
+
+    print_info("Step 9: Installing archlinuxcn keyring")
+    if not install_archlinuxcn_keyring():
+        print_error("Failed to install archlinuxcn keyring.")
+        exit(1)
+
+    print_info("Step 10: Generating fstab")
     if not generate_fstab():
         print_error("Failed to generate fstab.")
         exit(1)
 
-    print_info("Step 9: Setting timezone")
+    print_info("Step 11: Setting timezone")
     if not set_timezone():
         print_error("Failed to set timezone.")
         exit(1)
 
-    print_info("Step 10: Setting locale")
+    print_info("Step 12: Setting locale")
     if not set_locale():
         print_error("Failed to set locale.")
         exit(1)
 
-    print_info("Step 11: Setting hostname")
+    print_info("Step 13: Setting hostname")
     if not set_hostname(hostname):
         print_error("Failed to set hostname.")
         exit(1)
 
-    print_info("Step 12: Setting root password")
-    if not set_root_password(root_password):
-        print_error("Failed to set root password.")
+    print_info("Step 14: Configuring audio driver options")
+    if not configure_audio():
+        print_error("Failed to configure audio driver options.")
         exit(1)
 
-    print_info("Step 13: Creating regular user")
+    print_info("Step 15: Configuring zram-generator")
+    if not configure_zram():
+        print_error("Failed to configure zram-generator.")
+        exit(1)
+
+    print_info("Step 16: Configuring sudo")
+    if not configure_sudo():
+        print_error("Failed to configure sudo.")
+        exit(1)
+
+    print_info("Step 17: Creating regular user")
     if not create_regular_user(username, user_password):
         print_error("Failed to create regular user.")
         exit(1)
 
-    print_info("Step 14: Enabling system services")
+    print_info("Step 18: Enabling system services")
     if not enable_services():
         print_error("Failed to enable system services.")
         exit(1)
 
-    print_info("Step 15: Setting up GRUB bootloader")
+    if install_kde_selected:
+        print_info("Step 19: Installing KDE Plasma desktop environment")
+        if not install_kde.main(use_chroot=True):
+            print_error("Failed to install KDE Plasma desktop environment.")
+            exit(1)
+
+    print_info("Step 20: Setting up GRUB bootloader")
     if not setup_grub():
         print_error("Failed to set up GRUB bootloader.")
         exit(1)
@@ -613,4 +736,6 @@ def main():
     print_info("You can now reboot into your new Arch Linux installation.")
 
 if __name__ == "__main__":
+    # 尽早初始化日志，确保后续所有输出都可追踪。
+    setup_logging(LOG_FILE_PATH)
     main()
