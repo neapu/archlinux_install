@@ -84,7 +84,7 @@ install_grub_efi() {
 
     grub-install --target=x86_64-efi --efi-directory="$GRUB_EFI_DIRECTORY" --boot-directory="$GRUB_EFI_DIRECTORY" --bootloader-id="$GRUB_BOOTLOADER_ID"
 
-    if [[ "$GRUB_EFI_DIRECTORY" == "/efi"]]; then
+    if [[ "$GRUB_EFI_DIRECTORY" == "/efi" ]]; then
         ln -s /efi/grub /boot/grub
     fi
 
